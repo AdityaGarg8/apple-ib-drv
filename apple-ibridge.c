@@ -8,35 +8,39 @@
 /**
  * DOC: Overview
  *
- * MacBookPro models with a Touch Bar (13,[23] and 14,[23]) have an Apple
- * iBridge chip (also known as T1 chip) which exposes the touch bar,
- * built-in webcam (iSight), ambient light sensor, and Secure Enclave
- * Processor (SEP) for TouchID. It shows up in the system as a USB device
- * with 3 configurations: 'Default iBridge Interfaces', 'Default iBridge
- * Interfaces(OS X)', and 'Default iBridge Interfaces(Recovery)'. While
- * the second one is used by MacOS to provide the fancy touch bar
- * functionality with custom buttons etc, this driver just uses the first.
+ * 2016 and 2017 MacBookPro models with a Touch Bar (MacBookPro13,[23] and
+ * MacBookPro14,[23]) have an Apple iBridge chip (also known as T1 chip) which
+ * exposes the touch bar, built-in webcam (iSight), ambient light sensor, and
+ * Secure Enclave Processor (SEP) for TouchID. It shows up in the system as a
+ * USB device with 3 configurations: 'Default iBridge Interfaces', 'Default
+ * iBridge Interfaces(OS X)', and 'Default iBridge Interfaces(Recovery)'.
  *
  * In the first (default after boot) configuration, 4 usb interfaces are
  * exposed: 2 related to the webcam, and 2 USB HID interfaces representing
  * the touch bar and the ambient light sensor. The webcam interfaces are
- * already handled by the uvcvideo driver; furthermore, the handling of the
- * input reports when "keys" on the touch bar are pressed is already handled
- * properly by the generic USB HID core. This leaves the management of the
- * touch bar modes (e.g. switching between function and special keys when the
- * FN key is pressed), the touch bar display (dimming and turning off), the
- * key-remapping when the FN key is pressed, and handling of the light sensor.
+ * already handled by the uvcvideo driver. However, there is a problem with
+ * the other two interfaces: one of them contains functionality (HID reports)
+ * used by both the touch bar and the ALS, which is an issue because the kernel
+ * allows only one driver to be attached to a given device. This driver exists
+ * to solve this issue.
  *
- * This driver is implemented as a HID driver that creates virtual HID devices
- * for the ALS and touch bar functionality, and the ALS and touch bar drivers
- * are HID drivers which in turn attach to these virtual HID devices. This
- * driver then relays the calls on the real HID devices to the virtual ones,
- * and visa versa.
+ * This driver is implemented as a HID driver that attaches to both HID
+ * interfaces and in turn creates several virtual child HID devices, one for
+ * each top-level collection found in each interfaces report descriptor. The
+ * touch bar and ALS drivers then attach to these virtual HID devices, and this
+ * driver forwards the operations between the real and virtual devices.
+ *
+ * One important aspect of this approach is that resulting (virtual) HID
+ * devices look much like the HID devices found on the later MacBookPro models
+ * which have a T2 chip, where there are separate USB interfaces for the touch
+ * bar and ALS functionality, which means that the touch bar and ALS drivers
+ * work (mostly) the same on both types of models.
  *
  * Lastly, this driver also takes care of the power-management for the
  * iBridge when suspending and resuming.
  */
 
+#include <linux/platform_device.h>
 #include <linux/acpi.h>
 #include <linux/device.h>
 #include <linux/hid.h>
@@ -44,23 +48,17 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/usb.h>
-#include <linux/version.h>
 
-#include "apple-ibridge.h"
-
+#include "hid-ids.h"
 #ifdef UPSTREAM
 #include "../hid/usbhid/usbhid.h"
 #else
 #define	hid_to_usb_dev(hid_dev) \
 	to_usb_device((hid_dev)->dev.parent->parent)
 #endif
-
-#define USB_ID_VENDOR_APPLE	0x05ac
-#define USB_ID_PRODUCT_IBRIDGE	0x8600
+#include "apple-ibridge.h"
 
 #define APPLEIB_BASIC_CONFIG	1
-
-#define	LOG_DEV(ib_dev)		(&(ib_dev)->acpi_dev->dev)
 
 static struct hid_device_id appleib_sub_hid_ids[] = {
 	{ HID_USB_DEVICE(USB_VENDOR_ID_LINUX_FOUNDATION,
@@ -69,83 +67,29 @@ static struct hid_device_id appleib_sub_hid_ids[] = {
 			 USB_DEVICE_ID_IBRIDGE_ALS) },
 };
 
+static struct {
+	unsigned int usage;
+	struct hid_device_id *dev_id;
+} appleib_usage_map[] = {
+	/* Default iBridge configuration, key inputs and mode settings */
+	{ 0x00010006, &appleib_sub_hid_ids[0] },
+	/* OS X iBridge configuration, digitizer inputs */
+	{ 0x000D0005, &appleib_sub_hid_ids[0] },
+	/* All iBridge configurations, display/DFR settings */
+	{ 0xFF120001, &appleib_sub_hid_ids[0] },
+	/* All iBridge configurations, ALS */
+	{ 0x00200041, &appleib_sub_hid_ids[1] },
+};
+
 struct appleib_device {
-	struct acpi_device	*acpi_dev;
-	acpi_handle		asoc_socw;
+	acpi_handle asoc_socw;
 };
 
 struct appleib_hid_dev_info {
 	struct hid_device	*hdev;
 	struct hid_device	*sub_hdevs[ARRAY_SIZE(appleib_sub_hid_ids)];
+	bool			sub_open[ARRAY_SIZE(appleib_sub_hid_ids)];
 };
-
-/**
- * appleib_find_report_field() - Find the field in the report with the given
- * usage.
- * @report: the report to search
- * @field_usage: the usage of the field to search for
- *
- * Returns: the hid field if found, or NULL if none found.
- */
-struct hid_field *appleib_find_report_field(struct hid_report *report,
-					    unsigned int field_usage)
-{
-	int f, u;
-
-	for (f = 0; f < report->maxfield; f++) {
-		struct hid_field *field = report->field[f];
-
-		if (field->logical == field_usage)
-			return field;
-
-		for (u = 0; u < field->maxusage; u++) {
-			if (field->usage[u].hid == field_usage)
-				return field;
-		}
-	}
-
-	return NULL;
-}
-EXPORT_SYMBOL_GPL(appleib_find_report_field);
-
-/**
- * appleib_find_hid_field() - Search all the reports of the device for the
- * field with the given usage.
- * @hdev: the device whose reports to search
- * @application: the usage of application collection that the field must
- *               belong to
- * @field_usage: the usage of the field to search for
- *
- * Returns: the hid field if found, or NULL if none found.
- */
-struct hid_field *appleib_find_hid_field(struct hid_device *hdev,
-					 unsigned int application,
-					 unsigned int field_usage)
-{
-	static const int report_types[] = { HID_INPUT_REPORT, HID_OUTPUT_REPORT,
-					    HID_FEATURE_REPORT };
-	struct hid_report *report;
-	struct hid_field *field;
-	int t;
-
-	for (t = 0; t < ARRAY_SIZE(report_types); t++) {
-		struct list_head *report_list =
-			    &hdev->report_enum[report_types[t]].report_list;
-		list_for_each_entry(report, report_list, list) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0)
-			if (report->application != application)
-				continue;
-#endif
-
-			field = appleib_find_report_field(report, field_usage);
-			if (field)
-				return field;
-		}
-	}
-
-	return NULL;
-}
-EXPORT_SYMBOL_GPL(appleib_find_hid_field);
 
 static int appleib_hid_raw_event(struct hid_device *hdev,
 				 struct hid_report *report, u8 *data, int size)
@@ -153,9 +97,11 @@ static int appleib_hid_raw_event(struct hid_device *hdev,
 	struct appleib_hid_dev_info *hdev_info = hid_get_drvdata(hdev);
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(hdev_info->sub_hdevs); i++)
-		hid_input_report(hdev_info->sub_hdevs[i], report->type, data,
-				 size, 0);
+	for (i = 0; i < ARRAY_SIZE(hdev_info->sub_hdevs); i++) {
+		if (READ_ONCE(hdev_info->sub_open[i]))
+			hid_input_report(hdev_info->sub_hdevs[i], report->type,
+					 data, size, 0);
+	}
 
 	return 0;
 }
@@ -220,7 +166,7 @@ static int appleib_forward_int_op(struct hid_device *hdev,
 {
 	struct appleib_hid_dev_info *hdev_info = hid_get_drvdata(hdev);
 	struct hid_device *sub_hdev;
-	int rc = 0;
+	int rc;
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(hdev_info->sub_hdevs); i++) {
@@ -228,13 +174,11 @@ static int appleib_forward_int_op(struct hid_device *hdev,
 		if (sub_hdev->driver) {
 			rc = forward(sub_hdev->driver, sub_hdev, args);
 			if (rc)
-				break;
+				return rc;
 		}
-
-		break;
 	}
 
-	return rc;
+	return 0;
 }
 
 static int appleib_hid_suspend_fwd(struct hid_driver *drv,
@@ -295,25 +239,38 @@ static void appleib_ll_stop(struct hid_device *hdev)
 {
 }
 
+static int appleib_set_open(struct hid_device *hdev, bool open)
+{
+	struct appleib_hid_dev_info *hdev_info = hdev->driver_data;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(hdev_info->sub_hdevs); i++) {
+		/*
+		 * hid_hw_open(), and hence appleib_ll_open(), is called
+		 * from the driver's probe function, which in turn is called
+		 * while adding the sub-hdev; but at this point we haven't yet
+		 * added the sub-hdev to our list. So if we don't find the
+		 * sub-hdev in our list assume it's in the process of being
+		 * added and set the flag on the first unset sub-hdev.
+		 */
+		if (hdev_info->sub_hdevs[i] == hdev ||
+		    !hdev_info->sub_hdevs[i]) {
+			WRITE_ONCE(hdev_info->sub_open[i], open);
+			return 0;
+		}
+	}
+
+	return -ENODEV;
+}
+
 static int appleib_ll_open(struct hid_device *hdev)
 {
-	/*
-	 * This is not currently implemented, because the existing sub-drivers
-	 * don't need it to be, and it seems unlikely they will ever need it to
-	 * be: we call hid_hw_open() in this driver, so implementing this
-	 * function here and appleib_ll_close() below would just involve the
-	 * enabling/disabling of the forwarding of events to the sub-device;
-	 * but since the sub-drivers only call hid_hw_open() inside their probe
-	 * functions and hid_hw_close() inside their remove functions, this
-	 * means we can always just forward the events and they will get
-	 * delivered if a sub-driver is bound to the sub-device and not if not.
-	 */
-	return 0;
+	return appleib_set_open(hdev, true);
 }
 
 static void appleib_ll_close(struct hid_device *hdev)
 {
-	/* see comment in appleib_ll_open */
+	appleib_set_open(hdev, false);
 }
 
 static int appleib_ll_power(struct hid_device *hdev, int level)
@@ -325,10 +282,8 @@ static int appleib_ll_power(struct hid_device *hdev, int level)
 
 static int appleib_ll_parse(struct hid_device *hdev)
 {
-	struct appleib_hid_dev_info *hdev_info = hdev->driver_data;
-
-	return hid_parse_report(hdev, hdev_info->hdev->rdesc,
-				hdev_info->hdev->rsize);
+	/* we've already called hid_parse_report() */
+	return 0;
 }
 
 static void appleib_ll_request(struct hid_device *hdev,
@@ -378,6 +333,18 @@ static struct hid_ll_driver appleib_ll_driver = {
 	.output_report = appleib_ll_output_report,
 };
 
+static struct hid_device_id *appleib_find_dev_id_for_usage(unsigned int usage)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(appleib_usage_map); i++) {
+		if (appleib_usage_map[i].usage == usage)
+			return appleib_usage_map[i].dev_id;
+	}
+
+	return NULL;
+}
+
 static struct hid_device *
 appleib_add_sub_dev(struct appleib_hid_dev_info *hdev_info,
 		    struct hid_device_id *dev_id)
@@ -417,6 +384,8 @@ appleib_add_sub_dev(struct appleib_hid_dev_info *hdev_info,
 static struct appleib_hid_dev_info *appleib_add_device(struct hid_device *hdev)
 {
 	struct appleib_hid_dev_info *hdev_info;
+	struct hid_device_id *dev_id;
+	unsigned int usage;
 	int i;
 
 	hdev_info = devm_kzalloc(&hdev->dev, sizeof(*hdev_info), GFP_KERNEL);
@@ -425,14 +394,21 @@ static struct appleib_hid_dev_info *appleib_add_device(struct hid_device *hdev)
 
 	hdev_info->hdev = hdev;
 
-	for (i = 0; i < ARRAY_SIZE(hdev_info->sub_hdevs); i++) {
-		hdev_info->sub_hdevs[i] =
-			appleib_add_sub_dev(hdev_info, &appleib_sub_hid_ids[i]);
+	for (i = 0; i < hdev->maxcollection; i++) {
+		usage = hdev->collection[i].usage;
+		dev_id = appleib_find_dev_id_for_usage(usage);
 
-		if (IS_ERR(hdev_info->sub_hdevs[i])) {
-			while (i-- > 0)
-				hid_destroy_device(hdev_info->sub_hdevs[i]);
-			return (void *)hdev_info->sub_hdevs[i];
+		if (!dev_id) {
+			hid_warn(hdev, "Unknown collection encountered with usage %x\n",
+				 usage);
+		} else {
+			hdev_info->sub_hdevs[i] = appleib_add_sub_dev(hdev_info, dev_id);
+
+			if (IS_ERR(hdev_info->sub_hdevs[i])) {
+				while (i-- > 0)
+					hid_destroy_device(hdev_info->sub_hdevs[i]);
+				return (void *)hdev_info->sub_hdevs[i];
+			}
 		}
 	}
 
@@ -444,8 +420,10 @@ static void appleib_remove_device(struct hid_device *hdev)
 	struct appleib_hid_dev_info *hdev_info = hid_get_drvdata(hdev);
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(hdev_info->sub_hdevs); i++)
-		hid_destroy_device(hdev_info->sub_hdevs[i]);
+	for (i = 0; i < ARRAY_SIZE(hdev_info->sub_hdevs); i++) {
+		if (hdev_info->sub_hdevs[i])
+			hid_destroy_device(hdev_info->sub_hdevs[i]);
+	}
 
 	hid_set_drvdata(hdev, NULL);
 }
@@ -509,7 +487,7 @@ static void appleib_hid_remove(struct hid_device *hdev)
 }
 
 static const struct hid_device_id appleib_hid_ids[] = {
-	{ HID_USB_DEVICE(USB_ID_VENDOR_APPLE, USB_ID_PRODUCT_IBRIDGE) },
+	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_IBRIDGE) },
 	{ },
 };
 
@@ -527,21 +505,19 @@ static struct hid_driver appleib_hid_driver = {
 #endif
 };
 
-static struct appleib_device *appleib_alloc_device(struct acpi_device *acpi_dev)
+static struct appleib_device *appleib_alloc_device(struct platform_device *pdev)
 {
 	struct appleib_device *ib_dev;
 	acpi_status sts;
 
-	ib_dev = devm_kzalloc(&acpi_dev->dev, sizeof(*ib_dev), GFP_KERNEL);
+	ib_dev = devm_kzalloc(&pdev->dev, sizeof(*ib_dev), GFP_KERNEL);
 	if (!ib_dev)
 		return ERR_PTR(-ENOMEM);
 
-	ib_dev->acpi_dev = acpi_dev;
-
 	/* get iBridge acpi power control method for suspend/resume */
-	sts = acpi_get_handle(acpi_dev->handle, "SOCW", &ib_dev->asoc_socw);
+	sts = acpi_get_handle(ACPI_HANDLE(&pdev->dev), "SOCW", &ib_dev->asoc_socw);
 	if (ACPI_FAILURE(sts)) {
-		dev_err(LOG_DEV(ib_dev),
+		dev_err(&pdev->dev,
 			"Error getting handle for ASOC.SOCW method: %s\n",
 			acpi_format_exception(sts));
 		return ERR_PTR(-ENXIO);
@@ -550,75 +526,69 @@ static struct appleib_device *appleib_alloc_device(struct acpi_device *acpi_dev)
 	/* ensure iBridge is powered on */
 	sts = acpi_execute_simple_method(ib_dev->asoc_socw, NULL, 1);
 	if (ACPI_FAILURE(sts))
-		dev_warn(LOG_DEV(ib_dev), "SOCW(1) failed: %s\n",
+		dev_warn(&pdev->dev, "SOCW(1) failed: %s\n",
 			 acpi_format_exception(sts));
 
 	return ib_dev;
 }
 
-static int appleib_probe(struct acpi_device *acpi)
+static int appleib_probe(struct platform_device *pdev)
 {
 	struct appleib_device *ib_dev;
 	int ret;
 
-	ib_dev = appleib_alloc_device(acpi);
+	ib_dev = appleib_alloc_device(pdev);
 	if (IS_ERR(ib_dev))
 		return PTR_ERR(ib_dev);
 
 	ret = hid_register_driver(&appleib_hid_driver);
 	if (ret) {
-		dev_err(LOG_DEV(ib_dev), "Error registering hid driver: %d\n",
+		dev_err(&pdev->dev, "Error registering hid driver: %d\n",
 			ret);
 		return ret;
 	}
 
-	acpi->driver_data = ib_dev;
+	platform_set_drvdata(pdev, ib_dev);
 
 	return 0;
 }
 
-static int appleib_remove(struct acpi_device *acpi)
+static int appleib_remove(struct platform_device *pdev)
 {
 	hid_unregister_driver(&appleib_hid_driver);
 
 	return 0;
 }
 
-static int appleib_suspend(struct device *dev)
+static int appleib_suspend(struct platform_device *pdev, pm_message_t message)
 {
 	struct appleib_device *ib_dev;
 	int rc;
 
-	ib_dev = acpi_driver_data(to_acpi_device(dev));
+	ib_dev = platform_get_drvdata(pdev);
 
 	rc = acpi_execute_simple_method(ib_dev->asoc_socw, NULL, 0);
 	if (ACPI_FAILURE(rc))
-		dev_warn(dev, "SOCW(0) failed: %s\n",
+		dev_warn(&pdev->dev, "SOCW(0) failed: %s\n",
 			 acpi_format_exception(rc));
 
 	return 0;
 }
 
-static int appleib_resume(struct device *dev)
+static int appleib_resume(struct platform_device *pdev)
 {
 	struct appleib_device *ib_dev;
 	int rc;
 
-	ib_dev = acpi_driver_data(to_acpi_device(dev));
+	ib_dev = platform_get_drvdata(pdev);
 
 	rc = acpi_execute_simple_method(ib_dev->asoc_socw, NULL, 1);
 	if (ACPI_FAILURE(rc))
-		dev_warn(dev, "SOCW(1) failed: %s\n",
+		dev_warn(&pdev->dev, "SOCW(1) failed: %s\n",
 			 acpi_format_exception(rc));
 
 	return 0;
 }
-
-static const struct dev_pm_ops appleib_pm = {
-	.suspend = appleib_suspend,
-	.resume = appleib_resume,
-	.restore = appleib_resume,
-};
 
 static const struct acpi_device_id appleib_acpi_match[] = {
 	{ "APP7777", 0 },
@@ -627,22 +597,19 @@ static const struct acpi_device_id appleib_acpi_match[] = {
 
 MODULE_DEVICE_TABLE(acpi, appleib_acpi_match);
 
-static struct acpi_driver appleib_driver = {
-	.name		= "apple-ibridge",
-	.class		= "apple_ibridge",
-	.owner		= THIS_MODULE,
-	.ids		= appleib_acpi_match,
-	.ops		= {
-		.add		= appleib_probe,
-		.remove		= appleib_remove,
-	},
-	.drv		= {
-		.pm		= &appleib_pm,
+static struct platform_driver appleib_driver = {
+	.probe		= appleib_probe,
+	.remove		= appleib_remove,
+	.suspend	= appleib_suspend,
+	.resume		= appleib_resume,
+	.driver		= {
+		.name		  = "apple-ibridge",
+		.acpi_match_table = appleib_acpi_match,
 	},
 };
 
-module_acpi_driver(appleib_driver)
+module_platform_driver(appleib_driver);
 
 MODULE_AUTHOR("Ronald Tschalär");
 MODULE_DESCRIPTION("Apple iBridge driver");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");

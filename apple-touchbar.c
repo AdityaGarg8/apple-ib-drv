@@ -6,8 +6,8 @@
  */
 
 /*
- * Recent MacBookPro models (13,[23] and 14,[23]) have a touch bar, which
- * is exposed via several USB interfaces. MacOS supports a fancy mode
+ * Recent MacBookPro models (MacBookPro 13,[23] and later) have a touch bar,
+ * which is exposed via several USB interfaces. MacOS supports a fancy mode
  * where arbitrary buttons can be defined; this driver currently only
  * supports the simple mode that consists of 3 predefined layouts
  * (escape-only, esc + special keys, and esc + function keys).
@@ -32,7 +32,6 @@
 #include <linux/jiffies.h>
 #include <linux/ktime.h>
 #include <linux/module.h>
-#include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
@@ -41,6 +40,7 @@
 #include <linux/usb.h>
 #include <linux/workqueue.h>
 
+#include "hid-ids.h"
 #include "apple-ibridge.h"
 
 #define HID_UP_APPLE		0xff120000
@@ -76,10 +76,12 @@
 
 #define APPLETB_MAX_DIM_TIME	30
 
+#define APPLETB_FEATURE_IS_T1	BIT(0)
+
 static int appletb_tb_def_idle_timeout = 5 * 60;
 module_param_named(idle_timeout, appletb_tb_def_idle_timeout, int, 0444);
 MODULE_PARM_DESC(idle_timeout, "Default touch bar idle timeout:\n"
-			       "    >0 - turn touch bar display off after no keyboard, trackpad, or touch bar input has been received for this many seconds;\n"
+			       "    [>0] - turn touch bar display off after no keyboard, trackpad, or touch bar input has been received for this many seconds;\n"
 			       "         the display will be turned back on as soon as new input is received\n"
 			       "     0 - turn touch bar display off (input does not turn it on again)\n"
 			       "    -1 - turn touch bar display on (does not turn off automatically)\n"
@@ -123,14 +125,10 @@ static ssize_t fnmode_store(struct device *dev, struct device_attribute *attr,
 			    const char *buf, size_t size);
 static DEVICE_ATTR_RW(fnmode);
 
-static bool use_correct_report = false;
-static DEVICE_BOOL_ATTR(alt, 0644, use_correct_report);
-
 static struct attribute *appletb_attrs[] = {
 	&dev_attr_idle_timeout.attr,
 	&dev_attr_dim_timeout.attr,
 	&dev_attr_fnmode.attr,
-	&dev_attr_alt.attr.attr,
 	NULL,
 };
 
@@ -176,7 +174,7 @@ struct appletb_device {
 	bool			dim_to_is_calc;
 	int			fn_mode;
 
-	bool			is_t2;
+	bool			is_t1;
 };
 
 struct appletb_key_translation {
@@ -201,29 +199,6 @@ static const struct appletb_key_translation appletb_fn_codes[] = {
 
 static struct appletb_device *appletb_dev;
 
-static int appletb_send_usb_ctrl(struct appletb_iface_info *iface_info,
-				 __u8 requesttype, struct hid_report *report,
-				 void *data, __u16 size)
-{
-	struct usb_device *dev = interface_to_usbdev(iface_info->usb_iface);
-	u8 ifnum = iface_info->usb_iface->cur_altsetting->desc.bInterfaceNumber;
-	int tries = 0;
-	int rc;
-
-	do {
-		rc = usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
-				     HID_REQ_SET_REPORT, requesttype,
-				     (report->type + 1) << 8 | report->id,
-				     ifnum, data, size, 2000);
-		if (rc != -EPIPE)
-			break;
-
-		usleep_range(1000 << tries, 3000 << tries);
-	} while (++tries < 5);
-
-	return (rc > 0) ? 0 : rc;
-}
-
 static bool appletb_disable_autopm(struct hid_device *hdev)
 {
 	int rc;
@@ -240,10 +215,12 @@ static bool appletb_disable_autopm(struct hid_device *hdev)
 
 /*
  * While the mode functionality is listed as a valid hid report in the usb
- * interface descriptor, it's not sent that way. Instead it's sent with
+ * interface descriptor, on a T1 it's not sent that way. Instead it's sent with
  * different request-type and without a leading report-id in the data. Hence
  * we need to send it as a custom usb control message rather via any of the
- * standard hid_hw_*request() functions.
+ * standard hid_hw_*request() functions. The device might return EPIPE for a
+ * while after setting the display mode on T1 models, so retrying should be
+ * done on those models.
  */
 static int appletb_set_tb_mode(struct appletb_device *tb_dev,
 			       unsigned char mode)
@@ -258,61 +235,46 @@ static int appletb_set_tb_mode(struct appletb_device *tb_dev,
 
 	report = tb_dev->mode_field->report;
 
-	if (tb_dev->is_t2) {
-		char data[] = { use_correct_report ? report->id : 0, mode };
-		buf = kmemdup(data, sizeof(data), GFP_KERNEL);
-	} else {
+	if (tb_dev->is_t1) {
 		buf = kmemdup(&mode, 1, GFP_KERNEL);
+	} else {
+		char data[] = { report->id, mode };
+
+		buf = kmemdup(data, sizeof(data), GFP_KERNEL);
 	}
 	if (!buf)
 		return -ENOMEM;
 
 	autopm_off = appletb_disable_autopm(tb_dev->mode_iface.hdev);
 
-	if (tb_dev->is_t2)
-		rc = appletb_send_usb_ctrl(&tb_dev->mode_iface,
-					   USB_DIR_OUT | USB_TYPE_CLASS |
-					   USB_RECIP_INTERFACE,
-					   report, buf, 2);
-	else
-		rc = appletb_send_usb_ctrl(&tb_dev->mode_iface,
-					   USB_DIR_OUT | USB_TYPE_VENDOR |
-					   USB_RECIP_DEVICE,
-					   report, buf, 1);
+	if (tb_dev->is_t1) {
+		int tries = 0;
+		struct usb_device *dev = interface_to_usbdev(tb_dev->mode_iface.usb_iface);
+		__u8 ifnum = tb_dev->mode_iface.usb_iface->cur_altsetting->desc.bInterfaceNumber;
+
+		do {
+			rc = usb_control_msg(dev, usb_sndctrlpipe(dev, 0), HID_REQ_SET_REPORT,
+					     USB_DIR_OUT | USB_RECIP_INTERFACE | USB_TYPE_VENDOR,
+					     (report->type + 1) << 8 | report->id,
+					     ifnum, buf, 1, 2000);
+
+			if (rc != -EPIPE)
+				break;
+
+			usleep_range(1000 << tries, 3000 << tries);
+		} while (++tries < 5);
+	} else {
+		rc = hid_hw_raw_request(tb_dev->mode_iface.hdev, report->id,
+					(__u8 *) buf, 2, report->type,
+					HID_REQ_SET_REPORT);
+	}
+
 	if (rc < 0)
 		dev_err(tb_dev->log_dev,
 			"Failed to set touch bar mode to %u (%d)\n", mode, rc);
 
 	if (autopm_off)
 		hid_hw_power(tb_dev->mode_iface.hdev, PM_HINT_NORMAL);
-
-	kfree(buf);
-
-	return rc;
-}
-
-/*
- * We don't use hid_hw_request() because that doesn't allow us to get the
- * returned status from the usb-control request; we also don't use
- * hid_hw_raw_request() because would mean duplicating the retry-on-EPIPE
- * in our appletb_send_usb_ctrl().
- */
-static int appletb_send_hid_report(struct appletb_iface_info *iface_info,
-				   struct hid_report *report)
-{
-	unsigned char *buf;
-	int rc;
-
-	buf = hid_alloc_report_buf(report, GFP_KERNEL);
-	if (!buf)
-		return -ENOMEM;
-
-	hid_output_report(report, buf);
-
-	rc = appletb_send_usb_ctrl(iface_info,
-				   USB_DIR_OUT | USB_TYPE_CLASS |
-							USB_RECIP_INTERFACE,
-				   report, buf, hid_report_len(report));
 
 	kfree(buf);
 
@@ -352,11 +314,7 @@ static int appletb_set_tb_disp(struct appletb_device *tb_dev,
 		tb_dev->tb_autopm_off =
 			appletb_disable_autopm(report->device);
 
-	rc = appletb_send_hid_report(&tb_dev->disp_iface, report);
-	if (rc < 0)
-		dev_err(tb_dev->log_dev,
-			"Failed to set touch bar display to %u (%d)\n", disp,
-			rc);
+	hid_hw_request(tb_dev->disp_iface.hdev, report, HID_REQ_SET_REPORT);
 
 	if (disp == APPLETB_CMD_DISP_OFF && tb_dev->tb_autopm_off) {
 		hid_hw_power(tb_dev->disp_iface.hdev, PM_HINT_NORMAL);
@@ -865,7 +823,6 @@ static struct usb_interface *appletb_get_usb_iface(struct hid_device *hdev)
 {
 	struct device *dev = &hdev->dev;
 
-	/* in kernel: dev && !is_usb_interface(dev) */
 	while (dev && !(dev->type && dev->type->name &&
 			!strcmp(dev->type->name, "usb_interface")))
 		dev = dev->parent;
@@ -979,6 +936,70 @@ appletb_get_iface_info(struct appletb_device *tb_dev, struct hid_device *hdev)
 	return NULL;
 }
 
+/**
+ * appletb_find_report_field() - Find the field in the report with the given
+ * usage.
+ * @report: the report to search
+ * @field_usage: the usage of the field to search for
+ *
+ * Returns: the hid field if found, or NULL if none found.
+ */
+static struct hid_field *appletb_find_report_field(struct hid_report *report,
+						   unsigned int field_usage)
+{
+	int f, u;
+
+	for (f = 0; f < report->maxfield; f++) {
+		struct hid_field *field = report->field[f];
+
+		if (field->logical == field_usage)
+			return field;
+
+		for (u = 0; u < field->maxusage; u++) {
+			if (field->usage[u].hid == field_usage)
+				return field;
+		}
+	}
+
+	return NULL;
+}
+
+/**
+ * appletb_find_hid_field() - Search all the reports of the device for the
+ * field with the given usage.
+ * @hdev: the device whose reports to search
+ * @application: the usage of application collection that the field must
+ *               belong to
+ * @field_usage: the usage of the field to search for
+ *
+ * Returns: the hid field if found, or NULL if none found.
+ */
+static struct hid_field *appletb_find_hid_field(struct hid_device *hdev,
+						unsigned int application,
+						unsigned int field_usage)
+{
+	static const int report_types[] = { HID_INPUT_REPORT, HID_OUTPUT_REPORT,
+					    HID_FEATURE_REPORT };
+	struct hid_report *report;
+	struct hid_field *field;
+	int t;
+
+	for (t = 0; t < ARRAY_SIZE(report_types); t++) {
+		struct list_head *report_list =
+			    &hdev->report_enum[report_types[t]].report_list;
+		list_for_each_entry(report, report_list, list) {
+			if (report->application != application)
+				continue;
+
+			field = appletb_find_report_field(report, field_usage);
+			if (field)
+				return field;
+		}
+	}
+
+	return NULL;
+}
+
 static int appletb_extract_report_and_iface_info(struct appletb_device *tb_dev,
 						 struct hid_device *hdev,
 						 const struct hid_device_id *id)
@@ -987,13 +1008,13 @@ static int appletb_extract_report_and_iface_info(struct appletb_device *tb_dev,
 	struct usb_interface *usb_iface;
 	struct hid_field *field;
 
-	field = appleib_find_hid_field(hdev, HID_GD_KEYBOARD, HID_USAGE_MODE);
+	field = appletb_find_hid_field(hdev, HID_GD_KEYBOARD, HID_USAGE_MODE);
 	if (field) {
 		iface_info = &tb_dev->mode_iface;
 		tb_dev->mode_field = field;
-		tb_dev->is_t2 = id->driver_data;
+		tb_dev->is_t1 = !!(id->driver_data & APPLETB_FEATURE_IS_T1);
 	} else {
-		field = appleib_find_hid_field(hdev, HID_USAGE_APPLE_APP,
+		field = appletb_find_hid_field(hdev, HID_USAGE_APPLE_APP,
 					       HID_USAGE_DISP);
 		if (!field)
 			return 0;
@@ -1001,7 +1022,7 @@ static int appletb_extract_report_and_iface_info(struct appletb_device *tb_dev,
 		iface_info = &tb_dev->disp_iface;
 		tb_dev->disp_field = field;
 		tb_dev->disp_field_aux1 =
-			appleib_find_hid_field(hdev, HID_USAGE_APPLE_APP,
+			appletb_find_hid_field(hdev, HID_USAGE_APPLE_APP,
 					       HID_USAGE_DISP_AUX1);
 
 		if (!tb_dev->disp_field_aux1 ||
@@ -1149,6 +1170,22 @@ static int appletb_probe(struct hid_device *hdev,
 	unsigned long flags;
 	int rc;
 
+	/* initialize the report info */
+	rc = hid_parse(hdev);
+	if (rc) {
+		dev_err(tb_dev->log_dev, "hid parse failed (%d)\n", rc);
+		goto error;
+	}
+
+	/* Ensure this usb endpoint is for the touchbar backlight, not keyboard
+	 * backlight.
+	 */
+	if ((hdev->product == USB_DEVICE_ID_APPLE_TOUCHBAR_BACKLIGHT) &&
+			!(hdev->collection && hdev->collection[0].usage ==
+				HID_USAGE_APPLE_APP)) {
+		return -ENODEV;
+	}
+
 	spin_lock_irqsave(&tb_dev->tb_lock, flags);
 
 	if (!tb_dev->log_dev)
@@ -1157,13 +1194,6 @@ static int appletb_probe(struct hid_device *hdev,
 	spin_unlock_irqrestore(&tb_dev->tb_lock, flags);
 
 	hid_set_drvdata(hdev, tb_dev);
-
-	/* initialize the report info */
-	rc = hid_parse(hdev);
-	if (rc) {
-		dev_err(tb_dev->log_dev, "als: hid parse failed (%d)\n", rc);
-		goto error;
-	}
 
 	rc = appletb_extract_report_and_iface_info(tb_dev, hdev, id);
 	if (rc < 0)
@@ -1294,54 +1324,60 @@ static int appletb_suspend(struct hid_device *hdev, pm_message_t message)
 	    message.event != PM_EVENT_FREEZE)
 		return 0;
 
-	/*
-	 * Wait for both interfaces to be suspended and no more async work
-	 * in progress.
-	 */
-	spin_lock_irqsave(&tb_dev->tb_lock, flags);
+	if (tb_dev->is_t1) {
 
-	if (!tb_dev->mode_iface.suspended && !tb_dev->disp_iface.suspended) {
-		tb_dev->active = false;
-		cancel_delayed_work(&tb_dev->tb_work);
+		/*
+		 * Wait for both interfaces to be suspended and no more async work
+		 * in progress.
+		 */
+
+		spin_lock_irqsave(&tb_dev->tb_lock, flags);
+
+		if (!tb_dev->mode_iface.suspended && !tb_dev->disp_iface.suspended) {
+			tb_dev->active = false;
+			cancel_delayed_work(&tb_dev->tb_work);
+		}
+
+		iface_info = appletb_get_iface_info(tb_dev, hdev);
+		if (iface_info)
+			iface_info->suspended = true;
+
+		if ((!tb_dev->mode_iface.hdev || tb_dev->mode_iface.suspended) &&
+		    (!tb_dev->disp_iface.hdev || tb_dev->disp_iface.suspended))
+			all_suspended = true;
+
+		spin_unlock_irqrestore(&tb_dev->tb_lock, flags);
+
+		flush_delayed_work(&tb_dev->tb_work);
+
+		if (!all_suspended)
+			return 0;
+
+		/*
+		 * The touch bar device itself remembers the last state when suspended
+		 * in some cases, but in others (e.g. when mode != off and disp == off)
+		 * it resumes with a different state; furthermore it may be only
+		 * partially responsive in that state. By turning both mode and disp
+		 * off we ensure it is in a good state when resuming (and this happens
+		 * to be the same state after booting/resuming-from-hibernate, so less
+		 * special casing between the two).
+		 */
+		if (message.event == PM_EVENT_SUSPEND) {
+			appletb_set_tb_mode(tb_dev, APPLETB_CMD_MODE_OFF);
+			appletb_set_tb_disp(tb_dev, APPLETB_CMD_DISP_OFF);
+		}
+
+		spin_lock_irqsave(&tb_dev->tb_lock, flags);
+
+		tb_dev->cur_tb_mode = APPLETB_CMD_MODE_OFF;
+		tb_dev->cur_tb_disp = APPLETB_CMD_DISP_OFF;
+
+		spin_unlock_irqrestore(&tb_dev->tb_lock, flags);
+
+		dev_info(tb_dev->log_dev, "Touchbar suspended.\n");
+	} else {
+		dev_info(tb_dev->log_dev, "T2 Mac detected, not handling suspend.\n");
 	}
-
-	iface_info = appletb_get_iface_info(tb_dev, hdev);
-	if (iface_info)
-		iface_info->suspended = true;
-
-	if ((!tb_dev->mode_iface.hdev || tb_dev->mode_iface.suspended) &&
-	    (!tb_dev->disp_iface.hdev || tb_dev->disp_iface.suspended))
-		all_suspended = true;
-
-	spin_unlock_irqrestore(&tb_dev->tb_lock, flags);
-
-	flush_delayed_work(&tb_dev->tb_work);
-
-	if (!all_suspended)
-		return 0;
-
-	/*
-	 * The touch bar device itself remembers the last state when suspended
-	 * in some cases, but in others (e.g. when mode != off and disp == off)
-	 * it resumes with a different state; furthermore it may be only
-	 * partially responsive in that state. By turning both mode and disp
-	 * off we ensure it is in a good state when resuming (and this happens
-	 * to be the same state after booting/resuming-from-hibernate, so less
-	 * special casing between the two).
-	 */
-	if (message.event == PM_EVENT_SUSPEND) {
-		appletb_set_tb_mode(tb_dev, APPLETB_CMD_MODE_OFF);
-		appletb_set_tb_disp(tb_dev, APPLETB_CMD_DISP_OFF);
-	}
-
-	spin_lock_irqsave(&tb_dev->tb_lock, flags);
-
-	tb_dev->cur_tb_mode = APPLETB_CMD_MODE_OFF;
-	tb_dev->cur_tb_disp = APPLETB_CMD_DISP_OFF;
-
-	spin_unlock_irqrestore(&tb_dev->tb_lock, flags);
-
-	dev_info(tb_dev->log_dev, "Touchbar suspended.\n");
 
 	return 0;
 }
@@ -1400,18 +1436,23 @@ static void appletb_free_device(struct appletb_device *tb_dev)
 }
 
 static const struct hid_device_id appletb_hid_ids[] = {
+	/* MacBook Pro's 2016, 2017, with T1 chip */
 	{ HID_USB_DEVICE(USB_VENDOR_ID_LINUX_FOUNDATION,
-			 USB_DEVICE_ID_IBRIDGE_TB) },
-	{ HID_USB_DEVICE(/* USB_VENDOR_ID_APPLE */ 0x05ac, 0x8102) },
-	{ HID_USB_DEVICE(/* USB_VENDOR_ID_APPLE */ 0x05ac, 0x8302),
-	  .driver_data = 1 },
+			 USB_DEVICE_ID_IBRIDGE_TB),
+	  .driver_data = APPLETB_FEATURE_IS_T1 },
+	/* MacBook Pro's 2018, 2019, with T2 chip: iBridge DFR brightness */
+	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE,
+			USB_DEVICE_ID_APPLE_TOUCHBAR_BACKLIGHT) },
+	/* MacBook Pro's 2018, 2019, with T2 chip: iBridge Display */
+	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE,
+			USB_DEVICE_ID_APPLE_TOUCHBAR_DISPLAY) },
 	{ },
 };
 
 MODULE_DEVICE_TABLE(hid, appletb_hid_ids);
 
 static struct hid_driver appletb_hid_driver = {
-	.name = "apple-ib-touchbar",
+	.name = "apple-touchbar",
 	.id_table = appletb_hid_ids,
 	.probe = appletb_probe,
 	.remove = appletb_remove,
@@ -1456,4 +1497,4 @@ module_exit(appletb_exit);
 
 MODULE_AUTHOR("Ronald Tschalär");
 MODULE_DESCRIPTION("MacBookPro Touch Bar driver");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");
