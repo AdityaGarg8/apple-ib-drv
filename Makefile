@@ -1,6 +1,5 @@
 obj-m += apple-ibridge.o
 obj-m += apple-touchbar.o
-obj-m += hid-apple-magic-backlight.o
 
 KVERSION := $(KERNELRELEASE)
 ifeq ($(origin KERNELRELEASE), undefined)
