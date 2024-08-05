@@ -28,9 +28,9 @@
 
 #define HID_USAGE_MODE		0x00ff0004
 
-static int appletb_tb_def_fn_mode = APPLETB_KBD_MODE_FN;
-module_param_named(fnmode, appletb_tb_def_fn_mode, int, 0444);
-MODULE_PARM_DESC(fnmode, "Default Fn key mode:\n"
+static int appletb_tb_def_mode = APPLETB_KBD_MODE_FN;
+module_param_named(mode, appletb_tb_def_mode, int, 0444);
+MODULE_PARM_DESC(mode, "Default touchbar mode:\n"
 			 "    0 - escape key only\n"
 			 "    [1] - function-keys only\n"
 			 "    2 - special keys only");
@@ -240,7 +240,7 @@ static int appletb_kbd_probe(struct hid_device *hdev, const struct hid_device_id
 		goto stop_hw;
 	}
 
-	ret = appletb_kbd_set_mode(kbd, appletb_tb_def_fn_mode);
+	ret = appletb_kbd_set_mode(kbd, appletb_tb_def_mode);
 	if (ret) {
 		dev_err_probe(dev, ret, "Failed to set touchbar mode\n");
 		goto close_hw;

@@ -23,6 +23,13 @@
 #define HID_USAGE_AUX1			0xff120020
 #define HID_USAGE_BRIGHTNESS		0xff120021
 
+static int appletb_bl_def_brightness = APPLETB_BL_ON;
+module_param_named(brightness, appletb_bl_def_brightness, int, 0444);
+MODULE_PARM_DESC(brightness, "Default brightness:\n"
+			 "    [1] - Full brightness\n"
+			 "    2 - Dim brightness\n"
+			 "    3 - Touchbar is off");
+
 struct appletb_bl {
 	struct hid_field *aux1_field, *brightness_field;
 	struct backlight_device *bdev;
@@ -133,7 +140,11 @@ static int appletb_bl_probe(struct hid_device *hdev, const struct hid_device_id 
 	bl->aux1_field = aux1_field;
 	bl->brightness_field = brightness_field;
 
-	ret = appletb_bl_set_brightness(bl, APPLETB_BL_OFF);
+	if (appletb_bl_def_brightness == APPLETB_BL_ON)
+		ret = appletb_bl_set_brightness(bl, appletb_bl_def_brightness);
+	else
+		ret = appletb_bl_set_brightness(bl, appletb_bl_def_brightness + 1);
+
 	if (ret) {
 		dev_err_probe(dev, ret, "Failed to set touch bar brightness to off\n");
 		goto close_hw;
