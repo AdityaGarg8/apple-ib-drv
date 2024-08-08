@@ -59,23 +59,6 @@ static const struct key_entry appletb_kbd_keymap_spcl[] = {
 	{ KE_END, 0 }
 };
 
-static const struct key_entry appletb_kbd_keymap_fn[] = {
-	{ KE_KEY, KEY_ESC, { KEY_ESC } },
-	{ KE_KEY, KEY_F1,  { KEY_F1 } },
-	{ KE_KEY, KEY_F2,  { KEY_F2 } },
-	{ KE_KEY, KEY_F3,  { KEY_F3 } },
-	{ KE_KEY, KEY_F4,  { KEY_F4 } },
-	{ KE_KEY, KEY_F5,  { KEY_F5 } },
-	{ KE_KEY, KEY_F6,  { KEY_F6 } },
-	{ KE_KEY, KEY_F7,  { KEY_F7 } },
-	{ KE_KEY, KEY_F8,  { KEY_F8 } },
-	{ KE_KEY, KEY_F9,  { KEY_F9 } },
-	{ KE_KEY, KEY_F10, { KEY_F10 } },
-	{ KE_KEY, KEY_F11, { KEY_F11 } },
-	{ KE_KEY, KEY_F12, { KEY_F12 } },
-	{ KE_END, 0 }
-};
-
 static int appletb_kbd_set_mode(struct appletb_kbd *kbd, u8 mode)
 {
 	struct hid_report *report = kbd->mode_field->report;
@@ -203,8 +186,12 @@ static int appletb_kbd_input_configured(struct hid_device *hdev, struct hid_inpu
 
 	__set_bit(EV_REP, input->evbit);
 
-	sparse_keymap_setup(input, appletb_kbd_keymap_fn, NULL);
 	sparse_keymap_setup(input, appletb_kbd_keymap_spcl, NULL);
+
+	for (int i = KEY_F1; i <= KEY_F12; i++) {
+		input_set_capability(input, EV_KEY, i);
+	}
+
 	return 0;
 }
 
