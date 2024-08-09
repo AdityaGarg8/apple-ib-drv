@@ -193,10 +193,10 @@ static void appletb_kbd_inp_event(struct input_handle *handle, unsigned int type
 				appletb_kbd_set_mode(kbd, APPLETB_KBD_MODE_FN);
 			else if (kbd->current_mode == APPLETB_KBD_MODE_FN)
 				appletb_kbd_set_mode(kbd, APPLETB_KBD_MODE_SPCL);
-		}
-		else if (value == 0)
+		} else if (value == 0) {
 			if (kbd->saved_mode != kbd->current_mode)
 				appletb_kbd_set_mode(kbd, kbd->saved_mode);
+		}
 	}
 }
 
@@ -215,9 +215,8 @@ static int appletb_kbd_inp_connect(struct input_handler *handler,
 		return -ENOENT;
 	}
 
-	if (handle->dev) {
+	if (handle->dev)
 		return -EEXIST;
-	}
 
 	handle->open = 0;
 	handle->dev = input_get_device(dev);
