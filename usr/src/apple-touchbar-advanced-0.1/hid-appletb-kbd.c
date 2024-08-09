@@ -194,7 +194,8 @@ static void appletb_kbd_inp_event(struct input_handle *handle, unsigned int type
 				appletb_kbd_set_mode(kbd, APPLETB_KBD_MODE_SPCL);
 		}
 		else if (value == 0)
-			appletb_kbd_set_mode(kbd, kbd->saved_mode);
+			if (kbd->saved_mode != kbd->current_mode)
+				appletb_kbd_set_mode(kbd, kbd->saved_mode);
 	}
 }
 
@@ -245,8 +246,6 @@ static int appletb_kbd_inp_connect(struct input_handler *handler,
 
 static void appletb_kbd_inp_disconnect(struct input_handle *handle)
 {
-	struct appletb_kbd *kbd = handle->private;
-
 	input_close_device(handle);
 	input_unregister_handle(handle);
 
@@ -364,6 +363,7 @@ static int appletb_kbd_probe(struct hid_device *hdev, const struct hid_device_id
 	ret = input_register_handler(&kbd->inp_handler);
 	if (ret) {
 		dev_err_probe(dev, ret, "Unable to register keyboard handler\n");
+		goto close_hw;
 	}
 
 	ret = appletb_kbd_set_mode(kbd, appletb_tb_def_mode);
