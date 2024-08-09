@@ -26,6 +26,8 @@
 #define APPLETB_KBD_MODE_OFF	3
 #define APPLETB_KBD_MODE_MAX	APPLETB_KBD_MODE_OFF
 
+#define APPLETB_DEVID_KEYBOARD	1
+
 #define HID_USAGE_MODE		0x00ff0004
 
 static int appletb_tb_def_mode = APPLETB_KBD_MODE_FN;
@@ -46,7 +48,6 @@ struct appletb_kbd {
 	u8 current_mode;
 	struct input_handler inp_handler;
 	struct input_handle kbd_handle;
-	struct input_handle tpd_handle;
 
 };
 
@@ -207,12 +208,9 @@ static int appletb_kbd_inp_connect(struct input_handler *handler,
 	struct input_handle *handle;
 	int rc;
 
-	if (id->driver_info == 1) {
+	if (id->driver_info == APPLETB_DEVID_KEYBOARD) {
 		handle = &kbd->kbd_handle;
 		handle->name = "tbkbd";
-	} else if (id->driver_info == 2) {
-		handle = &kbd->tpd_handle;
-		handle->name = "tbtpad";
 	} else {
 		return -ENOENT;
 	}
@@ -283,20 +281,11 @@ static const struct input_device_id appletb_kbd_input_devices[] = {
 			INPUT_DEVICE_ID_MATCH_VENDOR |
 			INPUT_DEVICE_ID_MATCH_KEYBIT,
 		.bustype = BUS_USB,
-		.vendor = 0x05ac /* USB_VENDOR_ID_APPLE */,
+		.vendor = USB_VENDOR_ID_APPLE,
 		.keybit = { [BIT_WORD(KEY_FN)] = BIT_MASK(KEY_FN) },
-		.driver_info = 1,
-	},			/* Builtin USB keyboard device */
-	{
-		.flags = INPUT_DEVICE_ID_MATCH_BUS |
-			INPUT_DEVICE_ID_MATCH_VENDOR |
-			INPUT_DEVICE_ID_MATCH_KEYBIT,
-		.bustype = BUS_USB,
-		.vendor = 0x05ac /* USB_VENDOR_ID_APPLE */,
-		.keybit = { [BIT_WORD(BTN_TOUCH)] = BIT_MASK(BTN_TOUCH) },
-		.driver_info = 2,
-	},			/* Builtin USB touchpad device */
-	{ },			/* Terminating zero entry */
+		.driver_info = APPLETB_DEVID_KEYBOARD,
+	},
+	{ }
 };
 
 static bool appletb_kbd_match_internal_device(struct input_handler *handler,
