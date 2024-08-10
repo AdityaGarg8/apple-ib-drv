@@ -30,12 +30,12 @@
 
 #define HID_USAGE_MODE		0x00ff0004
 
-static int appletb_tb_def_mode = APPLETB_KBD_MODE_FN;
+static int appletb_tb_def_mode = APPLETB_KBD_MODE_SPCL;
 module_param_named(mode, appletb_tb_def_mode, int, 0444);
 MODULE_PARM_DESC(mode, "Default touchbar mode:\n"
-			 "    0 - escape key only\n"
-			 "    [1] - function-keys only\n"
-			 "    2 - special keys only");
+			 "    0 - escape key\n"
+			 "    1 - function-keys\n"
+			 "    [2] - special keys");
 
 static bool appletb_tb_fn_toggle = true;
 module_param_named(fntoggle, appletb_tb_fn_toggle, bool, 0644);
