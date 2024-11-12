@@ -1,4 +1,3 @@
-obj-m += apple-ibridge.o
 obj-m += apple-touchbar.o
 
 KVERSION := $(KERNELRELEASE)
