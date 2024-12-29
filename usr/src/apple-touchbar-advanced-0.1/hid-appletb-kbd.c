@@ -44,6 +44,10 @@ static bool appletb_tb_fn_toggle = true;
 module_param_named(fntoggle, appletb_tb_fn_toggle, bool, 0644);
 MODULE_PARM_DESC(fntoggle, "Switch between Fn and media controls on pressing Fn key");
 
+static bool appletb_tb_autodim = true;
+module_param_named(autodim, appletb_tb_autodim, bool, 0644);
+MODULE_PARM_DESC(autodim, "Automatically dim and turn off the Touch Bar after some time");
+
 static int appletb_tb_dim_timeout = 60;
 module_param_named(dim_timeout, appletb_tb_dim_timeout, int, 0644);
 MODULE_PARM_DESC(dim_timeout, "Dim timeout in sec");
@@ -164,7 +168,7 @@ static void appletb_inactivity_timer(struct timer_list *t)
 {
 	struct appletb_kbd *kbd = from_timer(kbd, t, inactivity_timer);
 
-	if (kbd->backlight_dev) {
+	if (kbd->backlight_dev && appletb_tb_autodim) {
 		if (!kbd->has_dimmed) {
 			backlight_device_set_brightness(kbd->backlight_dev, 1);
 			kbd->has_dimmed = true;
@@ -178,8 +182,8 @@ static void appletb_inactivity_timer(struct timer_list *t)
 
 static void reset_inactivity_timer(struct appletb_kbd *kbd)
 {
-	if (kbd->backlight_dev) {
-		if (kbd -> has_dimmed || kbd -> has_turned_off) {
+	if (kbd->backlight_dev && appletb_tb_autodim) {
+		if (kbd->has_dimmed || kbd->has_turned_off) {
 			backlight_device_set_brightness(kbd->backlight_dev, 2);
 			kbd->has_dimmed = false;
 			kbd->has_turned_off = false;
@@ -316,9 +320,8 @@ static int appletb_kbd_input_configured(struct hid_device *hdev, struct hid_inpu
 
 	sparse_keymap_setup(input, appletb_kbd_keymap, NULL);
 
-	for (idx = 0; appletb_kbd_keymap[idx].type != KE_END; idx++) {
+	for (idx = 0; appletb_kbd_keymap[idx].type != KE_END; idx++)
 		input_set_capability(input, EV_KEY, appletb_kbd_keymap[idx].code);
-	}
 
 	return 0;
 }
