@@ -36,7 +36,7 @@
 static int appletb_tb_def_mode = APPLETB_KBD_MODE_SPCL;
 module_param_named(mode, appletb_tb_def_mode, int, 0444);
 MODULE_PARM_DESC(mode, "Default touchbar mode:\n"
-			 "    0 - escape key\n"
+			 "    0 - escape key only\n"
 			 "    1 - function-keys\n"
 			 "    [2] - special keys");
 
@@ -496,6 +496,9 @@ static struct hid_driver appletb_kbd_hid_driver = {
 	.driver.dev_groups = appletb_kbd_groups,
 };
 module_hid_driver(appletb_kbd_hid_driver);
+
+/* The backlight driver should be loaded before the keyboard driver is initialised*/
+MODULE_SOFTDEP("pre: hid_appletb_bl");
 
 MODULE_AUTHOR("Ronald Tschalär");
 MODULE_AUTHOR("Kerem Karabay <kekrby@gmail.com>");
