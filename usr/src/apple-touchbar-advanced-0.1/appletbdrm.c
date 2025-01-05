@@ -21,7 +21,6 @@
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_gem_shmem_helper.h>
 #include <drm/drm_probe_helper.h>
-#include <drm/drm_simple_kms_helper.h>
 
 #define __APPLETBDRM_MSG_STR4(str4) ((__le32 __force)((str4[0] << 24) | (str4[1] << 16) | (str4[2] << 8) | str4[3]))
 #define __APPLETBDRM_MSG_TOK4(tok4) __APPLETBDRM_MSG_STR4(#tok4)
@@ -39,6 +38,57 @@
 #define drm_to_adev(_drm)		container_of(_drm, struct appletbdrm_device, drm)
 #define adev_to_udev(adev)		interface_to_usbdev(to_usb_interface(adev->dev))
 
+struct appletbdrm_display_pipe {
+	struct drm_crtc crtc;
+	struct drm_plane plane;
+	struct drm_encoder encoder;
+	struct drm_connector *connector;
+
+	const struct drm_simple_display_pipe_funcs *funcs;
+};
+struct appletbdrm_display_pipe_funcs {
+	enum drm_mode_status (*mode_valid)(struct drm_simple_display_pipe *pipe,
+					   const struct drm_display_mode *mode);
+
+	void (*enable)(struct drm_simple_display_pipe *pipe,
+		       struct drm_crtc_state *crtc_state,
+	void (*disable)(struct drm_simple_display_pipe *pipe);
+
+	int (*check)(struct drm_simple_display_pipe *pipe,
+		     struct drm_plane_state *plane_state,
+		     struct drm_crtc_state *crtc_state);
+
+	void (*update)(struct drm_simple_display_pipe *pipe,
+		       struct drm_plane_state *old_plane_state);
+
+	int (*prepare_fb)(struct drm_simple_display_pipe *pipe,
+			  struct drm_plane_state *plane_state);
+
+	void (*cleanup_fb)(struct drm_simple_display_pipe *pipe,
+			   struct drm_plane_state *plane_state);
+
+	int (*begin_fb_access)(struct drm_simple_display_pipe *pipe,
+			       struct drm_plane_state *new_plane_state);
+
+	void (*end_fb_access)(struct drm_simple_display_pipe *pipe,
+			      struct drm_plane_state *plane_state);
+
+	int (*enable_vblank)(struct drm_simple_display_pipe *pipe);
+
+	void (*disable_vblank)(struct drm_simple_display_pipe *pipe);
+
+	void (*reset_crtc)(struct drm_simple_display_pipe *pipe);
+
+	struct drm_crtc_state * (*duplicate_crtc_state)(struct drm_simple_display_pipe *pipe);
+
+	void (*destroy_crtc_state)(struct drm_simple_display_pipe *pipe,
+				   struct drm_crtc_state *crtc_state);
+
+	void (*reset_plane)(struct drm_simple_display_pipe *pipe);
+	struct drm_plane_state * (*duplicate_plane_state)(struct drm_simple_display_pipe *pipe);
+	void (*destroy_plane_state)(struct drm_simple_display_pipe *pipe,
+				    struct drm_plane_state *plane_state);
+};
 struct appletbdrm_device {
 	struct device *dev;
 
@@ -51,7 +101,7 @@ struct appletbdrm_device {
 	struct drm_device drm;
 	struct drm_display_mode mode;
 	struct drm_connector connector;
-	struct drm_simple_display_pipe pipe;
+	struct appletbdrm_display_pipe pipe;
 
 	bool readiness_signal_received;
 };
@@ -130,7 +180,43 @@ struct appletbdrm_fb_request_response {
 	u8 unk_14[12];
 	__le64 timestamp;
 } __packed;
+int appletbdrm_display_pipe_init(struct drm_device *dev,
+			struct appletbdrm_display_pipe *pipe,
+			const struct drm_simple_display_pipe_funcs *funcs,
+			const uint32_t *formats, unsigned int format_count,
+			const uint64_t *format_modifiers,
+			struct drm_connector *connector)
+{
+	struct drm_encoder *encoder = &pipe->encoder;
+	struct drm_plane *plane = &pipe->plane;
+	struct drm_crtc *crtc = &pipe->crtc;
+	int ret;
 
+	pipe->connector = connector;
+	pipe->funcs = funcs;
+
+	drm_plane_helper_add(plane, &drm_simple_kms_plane_helper_funcs);
+	ret = drm_universal_plane_init(dev, plane, 0,
+				       &drm_simple_kms_plane_funcs,
+				       formats, format_count,
+				       format_modifiers,
+				       DRM_PLANE_TYPE_PRIMARY, NULL);
+	if (ret)
+		return ret;
+
+	drm_crtc_helper_add(crtc, &drm_simple_kms_crtc_helper_funcs);
+	ret = drm_crtc_init_with_planes(dev, crtc, plane, NULL,
+					&drm_simple_kms_crtc_funcs, NULL);
+	if (ret)
+		return ret;
+
+	encoder->possible_crtcs = drm_crtc_mask(crtc);
+	ret = drm_simple_encoder_init(dev, encoder, DRM_MODE_ENCODER_NONE);
+	if (ret || !connector)
+		return ret;
+
+	return drm_connector_attach_encoder(connector, encoder);
+}
 static int appletbdrm_send_request(struct appletbdrm_device *adev,
 				   struct appletbdrm_request_header *request, size_t size)
 {
@@ -402,7 +488,7 @@ static int appletbdrm_connector_helper_get_modes(struct drm_connector *connector
 	return drm_connector_helper_get_modes_fixed(connector, &adev->mode);
 }
 
-static enum drm_mode_status appletbdrm_pipe_mode_valid(struct drm_simple_display_pipe *pipe,
+static enum drm_mode_status appletbdrm_pipe_mode_valid(struct appletbdrm_display_pipe *pipe,
 						       const struct drm_display_mode *mode)
 {
 	struct drm_crtc *crtc = &pipe->crtc;
@@ -411,7 +497,7 @@ static enum drm_mode_status appletbdrm_pipe_mode_valid(struct drm_simple_display
 	return drm_crtc_helper_mode_valid_fixed(crtc, mode, &adev->mode);
 }
 
-static void appletbdrm_pipe_disable(struct drm_simple_display_pipe *pipe)
+static void appletbdrm_pipe_disable(struct appletbdrm_display_pipe *pipe)
 {
 	struct appletbdrm_device *adev = drm_to_adev(pipe->crtc.dev);
 	int idx;
@@ -424,7 +510,7 @@ static void appletbdrm_pipe_disable(struct drm_simple_display_pipe *pipe)
 	drm_dev_exit(idx);
 }
 
-static void appletbdrm_pipe_update(struct drm_simple_display_pipe *pipe,
+static void appletbdrm_pipe_update(struct appletbdrm_display_pipe *pipe,
 				   struct drm_plane_state *old_state)
 {
 	struct drm_crtc *crtc = &pipe->crtc;
@@ -462,7 +548,7 @@ static const struct drm_connector_helper_funcs appletbdrm_connector_helper_funcs
 	.get_modes = appletbdrm_connector_helper_get_modes,
 };
 
-static const struct drm_simple_display_pipe_funcs appletbdrm_pipe_funcs = {
+static const struct appletbdrm_display_pipe_funcs appletbdrm_pipe_funcs = {
 	DRM_GEM_SIMPLE_DISPLAY_PIPE_SHADOW_PLANE_FUNCS,
 	.update = appletbdrm_pipe_update,
 	.disable = appletbdrm_pipe_disable,
@@ -531,7 +617,7 @@ static int appletbdrm_setup_mode_config(struct appletbdrm_device *adev)
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to set non-desktop property\n");
 
-	ret = drm_simple_display_pipe_init(drm, &adev->pipe, &appletbdrm_pipe_funcs,
+	ret = appletbdrm_display_pipe_init(drm, &adev->pipe, &appletbdrm_pipe_funcs,
 					   appletbdrm_formats, ARRAY_SIZE(appletbdrm_formats),
 					   NULL, &adev->connector);
 	if (ret)
