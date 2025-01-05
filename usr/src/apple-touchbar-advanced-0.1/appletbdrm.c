@@ -186,7 +186,7 @@ struct appletbdrm_fb_request_response {
 } __packed;
 int appletbdrm_display_pipe_init(struct drm_device *dev,
 			struct appletbdrm_display_pipe *pipe,
-			const struct drm_simple_display_pipe_funcs *funcs,
+			const struct appletbdrm_display_pipe_funcs *funcs,
 			const uint32_t *formats, unsigned int format_count,
 			const uint64_t *format_modifiers,
 			struct drm_connector *connector)
