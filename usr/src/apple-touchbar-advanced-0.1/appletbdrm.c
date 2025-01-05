@@ -7,51 +7,111 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <linux/unaligned.h>
-
-#include <linux/usb.h>
 #include <linux/module.h>
+#include <linux/unaligned.h>
+#include <linux/usb.h>
 
-#include <drm/drm_drv.h>
-#include <drm/drm_fourcc.h>
-#include <drm/drm_probe_helper.h>
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_crtc.h>
 #include <drm/drm_damage_helper.h>
+#include <drm/drm_drv.h>
+#include <drm/drm_encoder.h>
 #include <drm/drm_format_helper.h>
-#include <drm/drm_gem_shmem_helper.h>
+#include <drm/drm_fourcc.h>
 #include <drm/drm_gem_atomic_helper.h>
-#include <drm/drm_simple_kms_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
+#include <drm/drm_gem_shmem_helper.h>
+#include <drm/drm_plane.h>
+#include <drm/drm_probe_helper.h>
 
-#define _APPLETBDRM_FOURCC(s)		(((s)[0] << 24) | ((s)[1] << 16) | ((s)[2] << 8) | (s)[3])
-#define APPLETBDRM_FOURCC(s)		_APPLETBDRM_FOURCC(#s)
+#define __APPLETBDRM_MSG_STR4(str4) ((__le32 __force)((str4[0] << 24) | (str4[1] << 16) | (str4[2] << 8) | str4[3]))
+#define __APPLETBDRM_MSG_TOK4(tok4) __APPLETBDRM_MSG_STR4(#tok4)
 
-#define APPLETBDRM_PIXEL_FORMAT		APPLETBDRM_FOURCC(RGBA) /* The actual format is BGR888 */
+#define APPLETBDRM_PIXEL_FORMAT      __APPLETBDRM_MSG_TOK4(RGBA) /* The actual format is BGR888 */
 #define APPLETBDRM_BITS_PER_PIXEL	24
 
-#define APPLETBDRM_MSG_CLEAR_DISPLAY	APPLETBDRM_FOURCC(CLRD)
-#define APPLETBDRM_MSG_GET_INFORMATION	APPLETBDRM_FOURCC(GINF)
-#define APPLETBDRM_MSG_UPDATE_COMPLETE	APPLETBDRM_FOURCC(UDCL)
-#define APPLETBDRM_MSG_SIGNAL_READINESS	APPLETBDRM_FOURCC(REDY)
+#define APPLETBDRM_MSG_CLEAR_DISPLAY	__APPLETBDRM_MSG_TOK4(CLRD)
+#define APPLETBDRM_MSG_GET_INFORMATION	__APPLETBDRM_MSG_TOK4(GINF)
+#define APPLETBDRM_MSG_UPDATE_COMPLETE	__APPLETBDRM_MSG_TOK4(UDCL)
+#define APPLETBDRM_MSG_SIGNAL_READINESS	__APPLETBDRM_MSG_TOK4(REDY)
 
 #define APPLETBDRM_BULK_MSG_TIMEOUT	1000
 
 #define drm_to_adev(_drm)		container_of(_drm, struct appletbdrm_device, drm)
 #define adev_to_udev(adev)		interface_to_usbdev(to_usb_interface(adev->dev))
 
+struct appletbdrm_display_pipe_funcs;
+
+struct appletbdrm_display_pipe {
+	struct drm_crtc crtc;
+	struct drm_plane plane;
+	struct drm_encoder encoder;
+	struct drm_connector *connector;
+
+	const struct appletbdrm_display_pipe_funcs *funcs;
+};
+struct appletbdrm_display_pipe_funcs {
+	enum drm_mode_status (*mode_valid)(struct appletbdrm_display_pipe *pipe,
+					   const struct drm_display_mode *mode);
+
+	void (*disable)(struct appletbdrm_display_pipe *pipe);
+
+	void (*update)(struct appletbdrm_display_pipe *pipe,
+		       struct drm_plane_state *old_plane_state);
+
+};
+
+int appletbdrm_display_pipe_init(struct drm_device *dev,
+			struct appletbdrm_display_pipe *pipe,
+			const struct appletbdrm_display_pipe_funcs *funcs,
+			const uint32_t *formats, unsigned int format_count,
+			const uint64_t *format_modifiers,
+			struct drm_connector *connector)
+{
+	struct drm_encoder *encoder = &pipe->encoder;
+	struct drm_plane *plane = &pipe->plane;
+	struct drm_crtc *crtc = &pipe->crtc;
+	int ret;
+
+	pipe->connector = connector;
+	pipe->funcs = funcs;
+
+	drm_plane_helper_add(plane, &drm_simple_kms_plane_helper_funcs);
+	ret = drm_universal_plane_init(dev, plane, 0,
+					&drm_simple_kms_plane_funcs,
+					formats, format_count,
+					format_modifiers,
+					DRM_PLANE_TYPE_PRIMARY, NULL);
+	if (ret)
+		return ret;
+
+	drm_crtc_helper_add(crtc, &drm_simple_kms_crtc_helper_funcs);
+	ret = drm_crtc_init_with_planes(dev, crtc, plane, NULL,
+					&drm_simple_kms_crtc_funcs, NULL);
+	if (ret)
+		return ret;
+
+	encoder->possible_crtcs = drm_crtc_mask(crtc);
+	ret = drm_simple_encoder_init(dev, encoder, DRM_MODE_ENCODER_NONE);
+	if (ret || !connector)
+	return ret;
+
+	return drm_connector_attach_encoder(connector, encoder);
+}
+
 struct appletbdrm_device {
 	struct device *dev;
 
-	u8 in_ep;
-	u8 out_ep;
+	unsigned int in_ep;
+	unsigned int out_ep;
 
-	u32 width;
-	u32 height;
+	unsigned int width;
+	unsigned int height;
 
 	struct drm_device drm;
 	struct drm_display_mode mode;
 	struct drm_connector connector;
-	struct drm_simple_display_pipe pipe;
+	struct appletbdrm_display_pipe pipe;
 
 	bool readiness_signal_received;
 };
@@ -66,12 +126,12 @@ struct appletbdrm_request_header {
 
 struct appletbdrm_response_header {
 	u8 unk_00[16];
-	u32 msg;
+	__le32 msg;
 } __packed;
 
 struct appletbdrm_simple_request {
 	struct appletbdrm_request_header header;
-	u32 msg;
+	__le32 msg;
 	u8 unk_14[8];
 	__le32 size;
 } __packed;
@@ -85,7 +145,7 @@ struct appletbdrm_information {
 	__le32 bytes_per_row;
 	__le32 orientation;
 	__le32 bitmap_info;
-	u32 pixel_format;
+	__le32 pixel_format;
 	__le32 width_inches;	/* floating point */
 	__le32 height_inches;	/* floating point */
 } __packed;
@@ -141,7 +201,7 @@ static int appletbdrm_send_request(struct appletbdrm_device *adev,
 	ret = usb_bulk_msg(udev, usb_sndbulkpipe(udev, adev->out_ep),
 			   request, size, &actual_size, APPLETBDRM_BULK_MSG_TIMEOUT);
 	if (ret) {
-		drm_err(drm, "Failed to send message (%pe)\n", ERR_PTR(ret));
+		drm_err(drm, "Failed to send message (%d)\n", ERR_PTR(ret));
 		return ret;
 	}
 
@@ -161,6 +221,7 @@ static int appletbdrm_read_response(struct appletbdrm_device *adev,
 	struct usb_device *udev = adev_to_udev(adev);
 	struct drm_device *drm = &adev->drm;
 	int ret, actual_size;
+	bool readiness_signal_received = false;
 
 retry:
 	ret = usb_bulk_msg(udev, usb_rcvbulkpipe(udev, adev->in_ep),
@@ -176,8 +237,8 @@ retry:
 	 * signal, in which case the response should be read again
 	 */
 	if (response->msg == APPLETBDRM_MSG_SIGNAL_READINESS) {
-		if (!adev->readiness_signal_received) {
-			adev->readiness_signal_received = true;
+		if (!readiness_signal_received) {
+			readiness_signal_received = true;
 			goto retry;
 		}
 
@@ -401,7 +462,7 @@ static int appletbdrm_connector_helper_get_modes(struct drm_connector *connector
 	return drm_connector_helper_get_modes_fixed(connector, &adev->mode);
 }
 
-static enum drm_mode_status appletbdrm_pipe_mode_valid(struct drm_simple_display_pipe *pipe,
+static enum drm_mode_status appletbdrm_pipe_mode_valid(struct appletbdrm_display_pipe *pipe,
 						       const struct drm_display_mode *mode)
 {
 	struct drm_crtc *crtc = &pipe->crtc;
@@ -410,7 +471,7 @@ static enum drm_mode_status appletbdrm_pipe_mode_valid(struct drm_simple_display
 	return drm_crtc_helper_mode_valid_fixed(crtc, mode, &adev->mode);
 }
 
-static void appletbdrm_pipe_disable(struct drm_simple_display_pipe *pipe)
+static void appletbdrm_pipe_disable(struct appletbdrm_display_pipe *pipe)
 {
 	struct appletbdrm_device *adev = drm_to_adev(pipe->crtc.dev);
 	int idx;
@@ -423,7 +484,7 @@ static void appletbdrm_pipe_disable(struct drm_simple_display_pipe *pipe)
 	drm_dev_exit(idx);
 }
 
-static void appletbdrm_pipe_update(struct drm_simple_display_pipe *pipe,
+static void appletbdrm_pipe_update(struct appletbdrm_display_pipe *pipe,
 				   struct drm_plane_state *old_state)
 {
 	struct drm_crtc *crtc = &pipe->crtc;
@@ -461,7 +522,7 @@ static const struct drm_connector_helper_funcs appletbdrm_connector_helper_funcs
 	.get_modes = appletbdrm_connector_helper_get_modes,
 };
 
-static const struct drm_simple_display_pipe_funcs appletbdrm_pipe_funcs = {
+static const struct appletbdrm_display_pipe_funcs appletbdrm_pipe_funcs = {
 	DRM_GEM_SIMPLE_DISPLAY_PIPE_SHADOW_PLANE_FUNCS,
 	.update = appletbdrm_pipe_update,
 	.disable = appletbdrm_pipe_disable,
@@ -530,7 +591,7 @@ static int appletbdrm_setup_mode_config(struct appletbdrm_device *adev)
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to set non-desktop property\n");
 
-	ret = drm_simple_display_pipe_init(drm, &adev->pipe, &appletbdrm_pipe_funcs,
+	ret = appletbdrm_display_pipe_init(drm, &adev->pipe, &appletbdrm_pipe_funcs,
 					   appletbdrm_formats, ARRAY_SIZE(appletbdrm_formats),
 					   NULL, &adev->connector);
 	if (ret)
