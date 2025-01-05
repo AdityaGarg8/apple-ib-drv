@@ -191,7 +191,7 @@ retry:
 			actual_size, size);
 		return -EIO;
 	}
-	
+
 	if (response->msg != expected_response) {
 		drm_err(drm, "Unexpected response from device (expected %p4ch found %p4ch)\n",
 			&expected_response, &response->msg);
