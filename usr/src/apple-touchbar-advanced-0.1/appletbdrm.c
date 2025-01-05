@@ -12,27 +12,27 @@
 #include <linux/usb.h>
 #include <linux/module.h>
 
-#include <drm/drm_drv.h>
-#include <drm/drm_fourcc.h>
-#include <drm/drm_probe_helper.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_damage_helper.h>
+#include <drm/drm_drv.h>
 #include <drm/drm_format_helper.h>
-#include <drm/drm_gem_shmem_helper.h>
+#include <drm/drm_fourcc.h>
 #include <drm/drm_gem_atomic_helper.h>
-#include <drm/drm_simple_kms_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
+#include <drm/drm_gem_shmem_helper.h>
+#include <drm/drm_probe_helper.h>
+#include <drm/drm_simple_kms_helper.h>
 
-#define _APPLETBDRM_FOURCC(s)		(((s)[0] << 24) | ((s)[1] << 16) | ((s)[2] << 8) | (s)[3])
-#define APPLETBDRM_FOURCC(s)		_APPLETBDRM_FOURCC(#s)
+#define __APPLETBDRM_MSG_STR4(str4) ((__le32 __force)((str4[0] << 24) | (str4[1] << 16) | (str4[2] << 8) | str4[3]))
+#define __APPLETBDRM_MSG_TOK4(tok4) __APPLETBDRM_MSG_STR4(#tok4)
 
-#define APPLETBDRM_PIXEL_FORMAT		APPLETBDRM_FOURCC(RGBA) /* The actual format is BGR888 */
+#define APPLETBDRM_PIXEL_FORMAT      __APPLETBDRM_MSG_TOK4(RGBA) /* The actual format is BGR888 */
 #define APPLETBDRM_BITS_PER_PIXEL	24
 
-#define APPLETBDRM_MSG_CLEAR_DISPLAY	APPLETBDRM_FOURCC(CLRD)
-#define APPLETBDRM_MSG_GET_INFORMATION	APPLETBDRM_FOURCC(GINF)
-#define APPLETBDRM_MSG_UPDATE_COMPLETE	APPLETBDRM_FOURCC(UDCL)
-#define APPLETBDRM_MSG_SIGNAL_READINESS	APPLETBDRM_FOURCC(REDY)
+#define APPLETBDRM_MSG_CLEAR_DISPLAY	__APPLETBDRM_MSG_TOK4(CLRD)
+#define APPLETBDRM_MSG_GET_INFORMATION	__APPLETBDRM_MSG_TOK4(GINF)
+#define APPLETBDRM_MSG_UPDATE_COMPLETE	__APPLETBDRM_MSG_TOK4(UDCL)
+#define APPLETBDRM_MSG_SIGNAL_READINESS	__APPLETBDRM_MSG_TOK4(REDY)
 
 #define APPLETBDRM_BULK_MSG_TIMEOUT	1000
 
@@ -42,11 +42,11 @@
 struct appletbdrm_device {
 	struct device *dev;
 
-	u8 in_ep;
-	u8 out_ep;
+	unsigned int in_ep;
+	unsigned int out_ep;
 
-	u32 width;
-	u32 height;
+	unsigned int width;
+	unsigned int height;
 
 	struct drm_device drm;
 	struct drm_display_mode mode;
@@ -66,12 +66,12 @@ struct appletbdrm_request_header {
 
 struct appletbdrm_response_header {
 	u8 unk_00[16];
-	u32 msg;
+	__le32 msg;
 } __packed;
 
 struct appletbdrm_simple_request {
 	struct appletbdrm_request_header header;
-	u32 msg;
+	__le32 msg;
 	u8 unk_14[8];
 	__le32 size;
 } __packed;
@@ -85,7 +85,7 @@ struct appletbdrm_information {
 	__le32 bytes_per_row;
 	__le32 orientation;
 	__le32 bitmap_info;
-	u32 pixel_format;
+	__le32 pixel_format;
 	__le32 width_inches;	/* floating point */
 	__le32 height_inches;	/* floating point */
 } __packed;
@@ -141,7 +141,7 @@ static int appletbdrm_send_request(struct appletbdrm_device *adev,
 	ret = usb_bulk_msg(udev, usb_sndbulkpipe(udev, adev->out_ep),
 			   request, size, &actual_size, APPLETBDRM_BULK_MSG_TIMEOUT);
 	if (ret) {
-		drm_err(drm, "Failed to send message (%pe)\n", ERR_PTR(ret));
+		drm_err(drm, "Failed to send message (%d)\n", ERR_PTR(ret));
 		return ret;
 	}
 
@@ -161,6 +161,7 @@ static int appletbdrm_read_response(struct appletbdrm_device *adev,
 	struct usb_device *udev = adev_to_udev(adev);
 	struct drm_device *drm = &adev->drm;
 	int ret, actual_size;
+	bool readiness_signal_received = false;
 
 retry:
 	ret = usb_bulk_msg(udev, usb_rcvbulkpipe(udev, adev->in_ep),
@@ -176,8 +177,8 @@ retry:
 	 * signal, in which case the response should be read again
 	 */
 	if (response->msg == APPLETBDRM_MSG_SIGNAL_READINESS) {
-		if (!adev->readiness_signal_received) {
-			adev->readiness_signal_received = true;
+		if (!readiness_signal_received) {
+			readiness_signal_received = true;
 			goto retry;
 		}
 
@@ -190,7 +191,7 @@ retry:
 			actual_size, size);
 		return -EIO;
 	}
-
+	
 	if (response->msg != expected_response) {
 		drm_err(drm, "Unexpected response from device (expected %p4ch found %p4ch)\n",
 			&expected_response, &response->msg);
