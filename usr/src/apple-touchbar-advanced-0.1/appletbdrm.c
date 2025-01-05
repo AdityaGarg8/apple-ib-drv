@@ -47,46 +47,47 @@ struct appletbdrm_display_pipe {
 	const struct drm_simple_display_pipe_funcs *funcs;
 };
 struct appletbdrm_display_pipe_funcs {
-	enum drm_mode_status (*mode_valid)(struct drm_simple_display_pipe *pipe,
+	enum drm_mode_status (*mode_valid)(struct appletbdrm_display_pipe *pipe,
 					   const struct drm_display_mode *mode);
 
-	void (*enable)(struct drm_simple_display_pipe *pipe,
-		       struct drm_crtc_state *crtc_state,
-	void (*disable)(struct drm_simple_display_pipe *pipe);
+	void (*enable)(struct appletbdrm_display_pipe *pipe,
+			struct drm_crtc_state *crtc_state,
+			struct drm_plane_state *plane_state);
+	void (*disable)(struct appletbdrm_display_pipe *pipe);
 
-	int (*check)(struct drm_simple_display_pipe *pipe,
+	int (*check)(struct appletbdrm_display_pipe *pipe,
 		     struct drm_plane_state *plane_state,
 		     struct drm_crtc_state *crtc_state);
 
-	void (*update)(struct drm_simple_display_pipe *pipe,
+	void (*update)(struct appletbdrm_display_pipe *pipe,
 		       struct drm_plane_state *old_plane_state);
 
-	int (*prepare_fb)(struct drm_simple_display_pipe *pipe,
+	int (*prepare_fb)(struct appletbdrm_display_pipe *pipe,
 			  struct drm_plane_state *plane_state);
 
-	void (*cleanup_fb)(struct drm_simple_display_pipe *pipe,
+	void (*cleanup_fb)(struct appletbdrm_display_pipe *pipe,
 			   struct drm_plane_state *plane_state);
 
-	int (*begin_fb_access)(struct drm_simple_display_pipe *pipe,
+	int (*begin_fb_access)(struct appletbdrm_display_pipe *pipe,
 			       struct drm_plane_state *new_plane_state);
 
-	void (*end_fb_access)(struct drm_simple_display_pipe *pipe,
+	void (*end_fb_access)(struct appletbdrm_display_pipe *pipe,
 			      struct drm_plane_state *plane_state);
 
-	int (*enable_vblank)(struct drm_simple_display_pipe *pipe);
+	int (*enable_vblank)(struct appletbdrm_display_pipe *pipe);
 
-	void (*disable_vblank)(struct drm_simple_display_pipe *pipe);
+	void (*disable_vblank)(struct appletbdrm_display_pipe *pipe);
 
-	void (*reset_crtc)(struct drm_simple_display_pipe *pipe);
+	void (*reset_crtc)(struct appletbdrm_display_pipe *pipe);
 
-	struct drm_crtc_state * (*duplicate_crtc_state)(struct drm_simple_display_pipe *pipe);
+	struct drm_crtc_state * (*duplicate_crtc_state)(struct appletbdrm_display_pipe *pipe);
 
-	void (*destroy_crtc_state)(struct drm_simple_display_pipe *pipe,
+	void (*destroy_crtc_state)(struct appletbdrm_display_pipe *pipe,
 				   struct drm_crtc_state *crtc_state);
 
-	void (*reset_plane)(struct drm_simple_display_pipe *pipe);
-	struct drm_plane_state * (*duplicate_plane_state)(struct drm_simple_display_pipe *pipe);
-	void (*destroy_plane_state)(struct drm_simple_display_pipe *pipe,
+	void (*reset_plane)(struct appletbdrm_display_pipe *pipe);
+	struct drm_plane_state * (*duplicate_plane_state)(struct appletbdrm_display_pipe *pipe);
+	void (*destroy_plane_state)(struct appletbdrm_display_pipe *pipe,
 				    struct drm_plane_state *plane_state);
 };
 struct appletbdrm_device {
