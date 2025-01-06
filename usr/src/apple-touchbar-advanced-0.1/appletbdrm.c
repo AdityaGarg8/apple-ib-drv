@@ -7,10 +7,9 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <linux/unaligned.h>
-
-#include <linux/usb.h>
 #include <linux/module.h>
+#include <linux/unaligned.h>
+#include <linux/usb.h>
 
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_crtc.h>
