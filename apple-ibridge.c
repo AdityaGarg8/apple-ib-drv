@@ -160,8 +160,13 @@ static int appleib_hid_raw_event(struct hid_device *hdev,
 	return 0;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,12,0)
 static __u8 *appleib_report_fixup(struct hid_device *hdev, __u8 *rdesc,
 				  unsigned int *rsize)
+#else
+static const __u8 *appleib_report_fixup(struct hid_device *hdev, __u8 *rdesc,
+				  unsigned int *rsize)
+#endif
 {
 	/* Some fields have a size of 64 bits, which according to HID 1.11
 	 * Section 8.4 is not valid ("An item field cannot span more than 4
@@ -577,12 +582,19 @@ static int appleib_probe(struct acpi_device *acpi)
 	return 0;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,2,0)
 static int appleib_remove(struct acpi_device *acpi)
 {
 	hid_unregister_driver(&appleib_hid_driver);
 
 	return 0;
 }
+#else
+static void appleib_remove(struct acpi_device *acpi)
+{
+	hid_unregister_driver(&appleib_hid_driver);
+}
+#endif
 
 static int appleib_suspend(struct device *dev)
 {
@@ -630,7 +642,9 @@ MODULE_DEVICE_TABLE(acpi, appleib_acpi_match);
 static struct acpi_driver appleib_driver = {
 	.name		= "apple-ibridge",
 	.class		= "apple_ibridge",
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,10,0)
 	.owner		= THIS_MODULE,
+#endif
 	.ids		= appleib_acpi_match,
 	.ops		= {
 		.add		= appleib_probe,
