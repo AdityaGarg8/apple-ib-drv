@@ -1411,7 +1411,7 @@ static const struct hid_device_id appletb_hid_ids[] = {
 MODULE_DEVICE_TABLE(hid, appletb_hid_ids);
 
 static struct hid_driver appletb_hid_driver = {
-	.name = "apple-ib-touchbar",
+	.name = "apple_ib_touchbar",
 	.id_table = appletb_hid_ids,
 	.probe = appletb_probe,
 	.remove = appletb_remove,
